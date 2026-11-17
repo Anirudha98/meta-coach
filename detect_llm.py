@@ -71,20 +71,25 @@ def parse(answer):
     return False if "OTHER" in answer else None
 
 
-def ask(model, key, user_turn):
-    body = json.dumps({"model": model, "temperature": 0, "max_tokens": MAX_TOKENS,
-                       "messages": [{"role": "system", "content": SYSTEM},
-                                    {"role": "user", "content": user_turn}]}).encode()
+def ask(model, key, user_turn, system=SYSTEM, **extra):
+    """One chat completion. `extra` adds request fields, e.g. reasoning_effort="low"."""
+    body = json.dumps(dict({"model": model, "temperature": 0, "max_tokens": MAX_TOKENS,
+                            "messages": [{"role": "system", "content": system},
+                                         {"role": "user", "content": user_turn}]}, **extra)).encode()
     req = urllib.request.Request(URL, body, {"Authorization": "Bearer " + key,
                                              "Content-Type": "application/json"})
     for wait in (2, 8, 30, None):
         try:
-            with urllib.request.urlopen(req, timeout=120) as r:
+            with urllib.request.urlopen(req, timeout=600) as r:
                 return json.load(r)["choices"][0]["message"]["content"] or ""
         except urllib.error.HTTPError as e:
             if e.code not in (429, 500, 502, 503) or wait is None:
                 sys.exit(f"API error {e.code}: {e.read().decode()[:300]}")
             time.sleep(wait)  # rate limited or server hiccup: back off and retry
+        except OSError as e:  # timeout or dropped connection
+            if wait is None:
+                sys.exit(f"Network error: {e}")
+            time.sleep(wait)
 
 
 def api_key():
