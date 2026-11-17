@@ -206,6 +206,26 @@ Read these with care:
 
 To update: `python3 load_logs.py && python3 detect_llm.py && python3 compare.py`.
 
+## Why not a fully automatic loop
+
+An obvious alternative is to let the model loop on its own: find mistakes, rewrite the
+instructions file, repeat. I chose not to, because a loop is only as good as its weakest
+step, and I measured every step:
+
+- **The weakest step is the model checking its own leads.** Its verifier agreed with my
+  review on 8 of 26 leads. In a loop that error repeats every round and keeps adding wrong
+  rules.
+- **The other steps are noisy too.** About half of the detector's flags are not real
+  corrections, and a third of the summary claims blame the wrong side.
+- **A loop needs a score, and the score is slow.** Telling whether a change helped takes
+  about 420 prompts, roughly six weeks. A daily loop would change the file faster than any
+  change can be measured.
+
+The steps already form a cycle (detect, summarize, propose, review, apply, compare). It just
+turns about once every six weeks, with a human approving each rule at the one step that
+measured unreliable. Once the verifier agrees with human labels well above 80%, which needs
+more labelled data, the review step could be dropped and the loop left to run on its own.
+
 ## Outside test: SWE-chat
 
 `swechat.py` samples labelled user prompts from SWE-chat (Stanford, ~18,000 real coding-agent
