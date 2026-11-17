@@ -8,7 +8,8 @@ Usage:  export NVIDIA_API_KEY=nvapi-...   (or put that line in .env)
         python3 detect_llm.py                      # predict + score, default model
         python3 detect_llm.py --model google/gemma-4-31b-it
         python3 detect_llm.py --check              # self-test, no network
-Predictions are cached per model in coach.db, so re-runs cost nothing.
+Every prompt I typed is scored (compare.py needs that); the ones with a hand label are
+used to measure the detector. Predictions are cached per model in coach.db.
 """
 import json
 import os
@@ -20,6 +21,7 @@ import urllib.error
 import urllib.request
 
 from label import score
+from signals import typed
 
 URL = "https://integrate.api.nvidia.com/v1/chat/completions"  # OpenAI-compatible
 DEFAULT_MODEL = "mistralai/mistral-large-4-1t-a52b"
@@ -92,13 +94,13 @@ def ask(model, key, user_turn, system=SYSTEM, **extra):
             time.sleep(wait)
 
 
-def api_key():
-    key = os.environ.get("NVIDIA_API_KEY")
+def api_key(name="NVIDIA_API_KEY"):
+    key = os.environ.get(name)
     if not key and os.path.exists(".env"):
         for line in open(".env"):
-            if line.startswith("NVIDIA_API_KEY="):
+            if line.startswith(name + "="):
                 key = line.split("=", 1)[1].strip().strip("\"'")
-    return key or sys.exit("Set NVIDIA_API_KEY (export it, or add it to .env)")
+    return key or sys.exit(f"Set {name} (export it, or add it to .env)")
 
 
 def run(db, model):
@@ -113,7 +115,7 @@ def run(db, model):
     for uuid, idx, sid, kind, text in rows:
         if kind == "reply":
             last_reply[sid] = text
-        elif (uuid, idx) in labels and (uuid, idx) not in done:
+        elif typed(text) and (uuid, idx) not in done:  # every prompt I typed, labelled or not
             pred = parse(ask(model, key, build(last_reply.get(sid), text)))
             if pred is None:  # no usable answer: don't cache it, so the next run asks again
                 print("?", end="", flush=True)
@@ -125,7 +127,9 @@ def run(db, model):
                      "JOIN labels l USING (uuid, idx) JOIN messages m USING (uuid, idx) "
                      "WHERE p.model=?", (model,)).fetchall()
     p, r, tp, fp, fn = score([(bool(p), bool(y)) for p, y, _ in got])
-    print(f"\n{model}: {len(got)} of {len(labels)} labelled prompts answered")
+    total, flagged = db.execute("SELECT count(*), sum(is_correction) FROM llm_preds WHERE model=?", (model,)).fetchone()
+    print(f"\n{model}: {total} prompts scored, {flagged or 0} flagged as corrections")
+    print(f"against my hand labels: {len(got)} of {len(labels)} labelled prompts answered")
     print(f"precision {p:.2f}  recall {r:.2f}  (hits {tp}, false alarms {fp}, missed {fn})")
     for pred, y, text in got:
         if bool(pred) != bool(y):

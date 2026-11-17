@@ -10,6 +10,10 @@ import sys
 # Blocks the app injects into the user slot: <system-reminder>..., <bash-input>..., etc.
 INJECTED = re.compile(r"<([a-z][a-z-]*)\b[^>]*>.*?</\1>", re.S)
 INTERRUPT = re.compile(r"^\[Request interrupted")
+# Text in the user slot that the user did not type: the app's recap after a long session,
+# and the brief another session wrote when it started this one.
+NOT_TYPED = ("This session is being continued from a previous conversation",
+             "Task (from the session that started this one)")
 
 # ponytail: keyword heuristics, tuned on 13 sessions of one user's English. They miss
 # polite corrections and misfire on e.g. "do it again for file B". Upgrade path: label
@@ -33,6 +37,12 @@ def classify(text):
     if CORRECTION.search(typed):
         return "correction"
     return "prompt"
+
+
+def typed(text):
+    """What the user typed in one user-slot message; "" for injected text and interrupts."""
+    out = "" if INTERRUPT.match(text.strip()) else INJECTED.sub("", text).strip()
+    return "" if out.startswith(NOT_TYPED) else out
 
 
 def session_signals(db):
@@ -85,6 +95,9 @@ def check():
     }
     for text, want in cases.items():
         assert classify(text) == want, (text, classify(text), want)
+    assert typed("<system-reminder>x</system-reminder>\nfix the login page") == "fix the login page"
+    assert typed("[Request interrupted by user]") == "" and typed("<a-b>z</a-b>") == ""
+    assert typed("<system-reminder>x</system-reminder>\n" + NOT_TYPED[1] + ": do it") == ""
 
     db = sqlite3.connect(":memory:")
     db.execute("CREATE TABLE messages (uuid, idx, session_id, ts, cwd, kind, tool, is_error, text)")

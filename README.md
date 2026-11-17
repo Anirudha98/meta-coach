@@ -9,7 +9,7 @@ then measures whether those changes actually reduce friction.
 2. **Friction signals** — done (`signals.py` for counts, `detect_llm.py` for corrections, `label.py` to score)
 3. **Daily summaries** through an LLM, so a month of history fits in context — done (`summarize.py`); a third of its friction claims misread the source, see results
 4. **Evaluator** that proposes a diff to the instructions file — done (`propose.py`): the model finds leads, I accept or reject each one, and only accepted leads are merged. The model's own verifier is not trusted, see results
-5. Replay held-out tasks with old vs new instructions and compare the friction numbers
+5. **Before/after comparison** of friction with the old and new instructions — tool done (`compare.py`), baseline recorded, waiting for enough sessions after the change. Replay is not built, see results
 
 ## Run
 
@@ -24,6 +24,7 @@ python3 summarize.py           # one summary per day, cached; prints the digest
 python3 propose.py --dry-run   # the leads and the source lines each would be checked against
 python3 propose.py --review    # I accept or reject each lead (a / r / q); resumes where it stopped
 python3 propose.py             # verify leads, merge the accepted ones, write proposal.diff (never edits the real file)
+python3 compare.py             # friction before vs after the instructions file was applied
 ```
 
 Every script has a `--check` self-test. No dependencies beyond Python 3.9.
@@ -168,3 +169,85 @@ Read these with care:
   lines can come out more general than the incident justifies, so read the diff before applying.
 - The verifier is asked "was the assistant at fault?", my labels answer "did I push back?".
   Any future judge should be tested against the 26 reviewed leads, on new sessions.
+
+## Before/after results
+
+`compare.py` splits sessions by whether they started before or after the instructions file
+was created (2026-11-17 06:44 UTC), and runs the same instruments on both sides.
+
+Baseline, the 13 sessions before the change:
+
+| Measure | Before |
+|---|---|
+| Prompts I typed, scored by the detector | 159 |
+| Flagged as corrections by the detector | 14 (8.8 per 100 prompts) |
+| Mistakes I confirmed in review | 3 (1.9 per 100 prompts) |
+| Times I interrupted the assistant | 3 |
+| Failed tool calls | 47 (5.2 per 100 calls) |
+
+After the change: 1 session and 2 prompts so far, far too few to say anything.
+
+Read these with care:
+
+- **This needs a lot more data than I have.** With a baseline this small, even a halving of
+  the flagged rate could not be told from chance until about 420 prompts have been typed
+  after the change, roughly six weeks at my current pace. Smaller effects are out of reach.
+  `compare.py` prints this number and refuses to compare below 100 after-prompts.
+- **It is not an experiment.** The tasks before and after differ, so a gap shows direction,
+  not cause. Alternating days with and without the file would be the fair design.
+- The detector is noisy (precision 0.42 on my labels). The confirmed-mistakes row is the
+  trustworthy one, and it only fills in when I review the new leads (`propose.py --review`).
+- Leads are dated by day, so a lead from the cutoff day counts as "before".
+- **Replay is not built.** The original plan was to replay held-out tasks with the old and
+  new instructions. There are no held-out tasks yet (the rules came from these same
+  sessions), the incidents depend on machine state that cannot be recreated (an SSD, an
+  installer mid-run), and replaying through a different model than the assistant I actually
+  use would test the wrong thing.
+
+To update: `python3 load_logs.py && python3 detect_llm.py && python3 compare.py`.
+
+## Outside test: SWE-chat
+
+`swechat.py` samples labelled user prompts from SWE-chat (Stanford, ~18,000 real coding-agent
+sessions; gated, needs `HF_TOKEN` in `.env`) and runs the same correction detector on them.
+213 prompts from 80 sessions, sampled 2026-11-17.
+
+| SWE-chat label | Prompts | Flagged by the detector |
+|---|---|---|
+| correction | 80 | 17 (21%) |
+| rejection | 2 | 0 |
+| failure_report | 20 | 5 (25%) |
+| non_pushback | 111 | 7 (6%) |
+
+Taken at face value, recall on corrections is 0.21 and precision 0.59. Do not take it at face value:
+
+- SWE-chat's "correction" is far looser than mine. Of 10 random "corrections" the detector
+  missed, about 9 are not corrections by my definition: "Fix all", "yes do option 1",
+  "What do you think?", follow-up questions. Their labels come from an LLM judge, and they
+  mark 38% of prompts as corrections against about 5% in mine.
+- So the low recall mostly measures the gap between the two definitions, not the detector.
+- What it does show: the detector flags 6% of prompts SWE-chat calls ordinary, similar to
+  its false-alarm rate on my own data, so that rate is not specific to me.
+- To use SWE-chat as a real test set, a sample has to be re-labelled by my definition first.
+
+### Re-labelled by my definition
+
+100 of the 213 prompts, picked at random, re-labelled by Claude using my definition (the
+`swechat_mine` table), not by me.
+
+- 24 of the 100 were not typed by a person at all: skill instructions, plan templates and
+  subagent reports that the agent put in the user's slot. SWE-chat labelled 5 of them
+  "correction". The detector flagged 3.
+- Of the 76 typed prompts, 4 are corrections and 4 borderline (my change did not work,
+  questioning a claim of mine, disliking a design). About 5 to 10%, close to my own rate.
+- SWE-chat's own labels against these: every real correction is marked "correction", but so
+  are 31 that are not (precision 0.11).
+
+| Detector against the re-labelled prompts | Precision | Recall |
+|---|---|---|
+| borderline counted as "not" | 0.29 | 0.50 (2 of 4) |
+| borderline counted as correction | 0.57 | 0.50 (4 of 8) |
+
+Close to its numbers on my own data (0.42 / 0.71), with only 4 to 8 positives, so the
+range is wide. The useful finding is the size of the problem: corrections are rare in other
+people's sessions too, and any count of them needs injected text filtered out first.

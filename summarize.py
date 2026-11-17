@@ -17,13 +17,9 @@ import sys
 import zlib
 
 from detect_llm import DEFAULT_MODEL, PASTE, api_key, ask, scrub
-from signals import INJECTED, classify
+from signals import INJECTED, NOT_TYPED, classify
 
 BUDGET = 48_000  # characters of transcript per request, roughly 12k tokens
-# Text in the user slot that the user did not type: the app's recap after a long session,
-# and the brief another session wrote when it started this one.
-NOT_TYPED = ("This session is being continued from a previous conversation",
-             "Task (from the session that started this one)")
 # Hidden reasoning counts against max_tokens. Even at low effort a 24,000-character day used
 # 3,200 tokens of it, and three days came back empty at 4,096.
 MAX_TOKENS = 8192
