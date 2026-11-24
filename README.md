@@ -271,3 +271,49 @@ Taken at face value, recall on corrections is 0.21 and precision 0.59. Do not ta
 Close to its numbers on my own data (0.42 / 0.71), with only 4 to 8 positives, so the
 range is wide. The useful finding is the size of the problem: corrections are rare in other
 people's sessions too, and any count of them needs injected text filtered out first.
+
+### Models as labellers (`--judge`)
+
+To get labels without a person, three models other than the detector's labelled all 213
+with a stricter prompt (`JUDGE` in swechat.py), and the majority vote is taken. GLM 5.3 was
+meant to be the third maker but did not answer, so two are NVIDIA's; a second vote uses
+one model per maker (Nemotron Ultra and Gemma 4), where a disagreement is "unsure".
+
+| | 3 models | 1 per maker |
+|---|---|---|
+| same label as the 100 re-labelled | 81 | 70 (51 of 213 unsure) |
+| my 4 corrections found | 2 | 2 |
+| injected text found (of 24) | 12 | 8 |
+| detector against the vote: precision / recall | 0.57 / 1.00 | 0.72 / 1.00 |
+
+The 3-model vote is the better key: more agreement and no prompts dropped. Dropping the
+unsure ones flatters the detector, since those are the hard cases. Neither key can stand in
+for a person on corrections: the vote misses half of the corrections in the re-labelled set
+and never says "borderline", so the detector's recall of 1.00 means it catches the obvious
+corrections the models agree on, not all of them. The models also miss half the injected
+text. Good enough to sort typed from not-typed roughly and to find clear corrections; not
+good enough to score recall.
+
+## Scenario test of the applied lines (2026-11-19)
+
+Do the 4 lines change what Claude says? 12 short scenarios written for the test (10 aimed
+at the lines, 2 traps where following a line too eagerly would be wrong), each answered once
+by Claude Sonnet 5.5 with the lines and once without, then judged blind by Sonnet, one
+criterion per scenario.
+
+Getting a clean "without": subagents inherit the parent session's CLAUDE.md (checked: two
+attempts quoted the lines back, even with the file moved aside), so the no-lines answers
+came from a new session started while `~/.claude/CLAUDE.md` was renamed for about 10
+seconds. Its own check found none of the lines.
+
+| | With the lines better | Without better |
+|---|---|---|
+| clear difference | S4 Supabase Free (did not lead with a paid feature), S5 GitHub Free (no "upgrade" first), S8, S9, S10 (asked before moving or converting files) | none |
+| small difference | S1 (Control not Cmd), S2, S3, S6, S7 | |
+| traps | S12 (just did it, no questions) | S11 (explained venv a bit better) |
+
+The judge never said "tie", so the small ones are closer to ties. What it shows: the lines
+change behaviour in the direction intended, most clearly for plan limits and file
+operations, and did not make Claude over-ask or take over a "teach me" request. What it
+does not show: whether real corrections drop. One run per side, 12 scenarios I wrote, Sonnet
+rather than the model used day to day, and a judge that could see the lines.

@@ -12,11 +12,13 @@ places in the conversations table, so nothing large is downloaded.
 Usage:  python3 swechat.py --peek         # column names and a few rows, to check assumptions
         python3 swechat.py --fetch 300    # sample about 300 labelled prompts into coach.db
         python3 swechat.py                # run the detector on the sample and score it
+        python3 swechat.py --judge        # three other models label the sample; majority vote
         python3 swechat.py --check        # self-test, no network
 """
 import http.client
 import json
 import random
+import re
 import sqlite3
 import sys
 import time
@@ -129,6 +131,96 @@ def run(db, model):
           else "\nnothing fetched yet: python3 swechat.py --fetch 300")
 
 
+# Stand-in for hand labels: three models, none of them the detector's, with a stricter prompt
+# than the detector's. Majority vote; a tie or no answer is "unsure". GLM 5.3 and gpt-oss-20b
+# were tried and did not answer on 2026-11-17, so two of the three are NVIDIA's.
+JUDGES = ("nvidia/nemotron-3-ultra-550b-a55b", "nvidia/nemotron-3.5-super-vl-120b-a12b", "google/gemma-4-31b-it")
+VERDICTS = ("INJECTED", "BORDERLINE", "CORRECTION", "OTHER")
+JUDGE = """You label messages sent to an AI coding assistant, to build a test set.
+Read the assistant's previous reply and the message after it, then pick ONE label:
+INJECTED: not typed by a person. Tool or command output, system notices, hook text,
+  auto-generated summaries of earlier context, file contents pasted with no request.
+CORRECTION: the person says the assistant's last step was wrong or unwanted, rested on a
+  wrong assumption, or ignored something the person had already said.
+  e.g. "no, I meant the other file", "why did you delete that?", "I told you not to use npm".
+BORDERLINE: a redirect that could be a correction or a new request, e.g. "actually, use
+  Postgres instead" with no sign the earlier choice was a mistake.
+OTHER: everything else: a new task, a follow-up question, approval, an answer to the
+  assistant's question, or a report that something outside failed ("the build fails with X")
+  without saying the assistant did it wrong.
+Reply with the label only: INJECTED, CORRECTION, BORDERLINE or OTHER."""
+
+
+def verdict(answer):
+    answer = re.sub(r"<think>.*?</think>", "", answer, flags=re.S).upper()
+    found = [v for v in VERDICTS if v in answer]
+    return found[0].lower() if len(found) == 1 else None  # two labels named: no answer
+
+
+# Second answer key with one model per maker, so two NVIDIA models cannot outvote Gemma.
+PAIR = ("nvidia/nemotron-3-ultra-550b-a55b", "google/gemma-4-31b-it")
+
+
+def vote(labels, n):
+    """Majority of n judges; a tie or too few answers is "unsure"."""
+    labels = [l for l in labels if l]
+    top = max(set(labels), key=labels.count) if labels else None
+    return top if top and labels.count(top) * 2 > n else "unsure"
+
+
+def votes(db, judges):
+    got = {}
+    for turn_id, model, label in db.execute("SELECT turn_id, model, label FROM swechat_judge"):
+        if model in judges:
+            got.setdefault(turn_id, []).append(label)
+    return {t: vote(l, len(judges)) for t, l in got.items()}
+
+
+def judge(db):
+    key = api_key()
+    db.execute("CREATE TABLE IF NOT EXISTS swechat_judge (turn_id, model, label, PRIMARY KEY (turn_id, model))")
+    for model in JUDGES:
+        todo = db.execute("SELECT turn_id, reply, prompt FROM swechat WHERE turn_id NOT IN "
+                          "(SELECT turn_id FROM swechat_judge WHERE model=?)", (model,)).fetchall()
+        print(f"{model}: {len(todo)} to label ", end="", flush=True)
+        with ThreadPoolExecutor(4) as pool:
+            answers = pool.map(lambda t: verdict(ask(model, key, build(t[1], t[2]), JUDGE)), todo)
+            for (turn_id, _, _), label in zip(todo, answers):
+                if label:
+                    db.execute("INSERT INTO swechat_judge VALUES (?,?,?)", (turn_id, model, label))
+                    db.commit()
+                print("?" if label is None else ".", end="", flush=True)
+        print()
+    for judges in (JUDGES, PAIR):
+        print(judge_report(db, judges))
+
+
+def judge_report(db, judges):
+    v = votes(db, judges)
+    counts = {}
+    for label in v.values():
+        counts[label] = counts.get(label, 0) + 1
+    out = [f"\n=== vote of {len(judges)}: " + ", ".join(j.split("/")[1] for j in judges),
+           "labels: " + ", ".join(f"{l} {n}" for l, n in sorted(counts.items(), key=lambda x: -x[1]))]
+    mine = [(m, v[t]) for t, m in db.execute("SELECT turn_id, label FROM swechat_mine") if t in v]
+    if mine:  # how far the vote can be trusted: agreement with the 100 I labelled by hand
+        same = sum(a == b for a, b in mine)
+        out.append(f"vs my hand labels: same label on {same} of {len(mine)}")
+        for want in ("correction", "borderline", "injected", "other"):
+            said = [b for a, b in mine if a == want]
+            out.append(f"  my {want:10} {len(said):3}: vote said " + ", ".join(
+                f"{l} {said.count(l)}" for l in sorted(set(said))))
+        p, r, tp, fp, fn = score([(b == "correction", a == "correction") for a, b in mine if b != "unsure"])
+        out.append(f"  vote as a correction finder (unsure left out): precision {p:.2f}  recall {r:.2f}")
+    preds = dict(db.execute("SELECT turn_id, is_correction FROM swechat_preds WHERE model=?", (DEFAULT_MODEL,)))
+    det = [(lab, preds[t]) for t, lab in v.items() if t in preds and lab in ("correction", "borderline", "other")]
+    for name, pos in (("borderline as not", ("correction",)), ("borderline as correction", ("correction", "borderline"))):
+        p, r, tp, fp, fn = score([(bool(f), lab in pos) for lab, f in det])
+        out.append(f"detector vs this vote, {len(det)} typed prompts, {name}: precision {p:.2f}  recall {r:.2f}"
+                   f"  (hits {tp}, false alarms {fp}, missed {fn})")
+    return "\n".join(out)
+
+
 def peek(token):
     d = rows(token, 0, 40)
     print("rows in table:", d["num_rows_total"])
@@ -161,6 +253,11 @@ def check():
     assert "correction          2 prompts, flagged    1 (50%)" in report, report
     assert "corrections and rejections only: precision 0.50  recall 0.50" in report
     assert "any pushback: precision 1.00  recall 0.67" in report
+    assert verdict("<think>maybe OTHER</think> Correction.") == "correction"
+    assert verdict("CORRECTION or OTHER") is None and verdict("") is None
+    assert vote(["correction", "correction", None], 3) == "correction"
+    assert vote(["correction", "other", "borderline"], 3) == "unsure" and vote([None, None, "other"], 3) == "unsure"
+    assert vote(["other", "other"], 2) == "other" and vote(["other", "correction"], 2) == "unsure"
     print("check passed")
 
 
@@ -169,6 +266,10 @@ if __name__ == "__main__":
         check()
     elif "--peek" in sys.argv:
         peek(api_key("HF_TOKEN"))
+    elif "--votes" in sys.argv:  # reports only, no API calls
+        print("\n".join(judge_report(sqlite3.connect("coach.db"), j) for j in (JUDGES, PAIR)))
+    elif "--judge" in sys.argv:
+        judge(sqlite3.connect("coach.db"))
     elif "--fetch" in sys.argv:
         fetch(sqlite3.connect("coach.db"), api_key("HF_TOKEN"), int(sys.argv[sys.argv.index("--fetch") + 1]))
     else:
